@@ -1,0 +1,104 @@
+pipeline {
+    agent any
+
+    environment {
+        SSH_CRED_ID = 'ccb-deploy-ssh'
+        HOST_MAIN   = ''
+        HOST_2 = ''
+    }
+
+    stages {
+
+        stage('STOP WebLogic') {
+            steps {
+                script {
+                    echo "🛑 WebLogic STOP (${HOST_MAIN})"
+
+                    withCredentials([sshUserPrivateKey(
+                        credentialsId: SSH_CRED_ID,
+                        keyFileVariable: 'SSH_KEY',
+                        usernameVariable: 'SSH_USER'
+                    )]) {
+                        sh """
+                          ssh -i "\$SSH_KEY" -o StrictHostKeyChecking=no \
+                          \$SSH_USER@${HOST_MAIN} "
+                            cd /appdata/restart
+                            sh stop.sh
+                          "
+                        """
+                    }
+                }
+            }
+        }
+        stage('renamefolder (MAIN)') {
+            steps {
+                script {
+                    echo "📁 renamefolder2.sh çalışıyor (MAIN)..."
+
+                    withCredentials([sshUserPrivateKey(
+                        credentialsId: SSH_CRED_ID,
+                        keyFileVariable: 'SSH_KEY',
+                        usernameVariable: 'SSH_USER'
+                    )]) {
+
+                        sh """
+                            ssh -i "\$SSH_KEY" -o StrictHostKeyChecking=no \$SSH_USER@${HOST_MAIN} "
+                                cd /appdata/scripts
+                                sh renamefolder2.sh
+                            "
+                        """
+                    }
+                }
+            }
+        }
+
+        stage('renamefolder (2)') {
+            steps {
+                script {
+                    echo "📁 renamefolder2.sh çalışıyor (2)..."
+
+                    withCredentials([sshUserPrivateKey(
+                        credentialsId: SSH_CRED_ID,
+                        keyFileVariable: 'SSH_KEY',
+                        usernameVariable: 'SSH_USER'
+                    )]) {
+
+                        sh """
+                            ssh -i "\$SSH_KEY" -o StrictHostKeyChecking=no \$SSH_USER@${HOST_2} "
+                                cd /appdata/scripts
+                                sh renamefolder2.sh
+                            "
+                        """
+                    }
+                }
+            }
+        }
+        stage('Manual Confirm') {
+            steps {
+                input "STOP tamamlandı. START için Proceed."
+            }
+        }
+   
+        stage('START WebLogic') {
+            steps {
+                script {
+                    echo "🚀 WebLogic START (${HOST_MAIN})"
+
+                    withCredentials([sshUserPrivateKey(
+                        credentialsId: SSH_CRED_ID,
+                        keyFileVariable: 'SSH_KEY',
+                        usernameVariable: 'SSH_USER'
+                    )]) {
+                        sh """
+                          ssh -i "\$SSH_KEY" -o StrictHostKeyChecking=no \
+                          \$SSH_USER@${HOST_MAIN} "
+                            cd /appdata/restart
+                            sh start.sh
+                          "
+                        """
+                    }
+                }
+            }
+        }
+    }
+}

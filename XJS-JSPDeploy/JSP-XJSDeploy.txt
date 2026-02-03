@@ -1,0 +1,68 @@
+pipeline {
+    agent any
+    
+    environment {
+        GIT_REPO_URL = 'git_url'
+        SSH_CRED_ID  = 'ccb-deploy-ssh'     // Jenkins SSH key ID
+
+        REMOTE_HOST  = ''
+        BASE_DIR = ''
+    }
+    
+    stages {
+
+        stage('Onay 1') {
+            steps {
+                input message: "JSP/XJS ve benzeri dosya adreslere MANUEL yüklendi."
+            }
+        }
+        
+        stage('Structers temizleme ve InitialSetup ') {
+            steps {
+                script {
+                    echo "🔧 initialSetup çalıştırılıyor..."
+
+                    withCredentials([sshUserPrivateKey(
+                        credentialsId: SSH_CRED_ID,
+                        keyFileVariable: 'SSH_KEY',
+                        usernameVariable: 'SSH_USER'
+                    )]) {
+
+                        sh """
+                            ssh -i "\$SSH_KEY" -o StrictHostKeyChecking=no \$SSH_USER@${REMOTE_HOST} "
+                                        sh /appdata/scripts/splenv.sh << EOF
+                                        rm -rf /appdata/ouaf/CCBMIG/structures/*.processed
+                                        sh /appdata/ouaf/CCBMIG/bin/initialSetup.sh << EOF
+                                    "
+                        """
+                    }
+                }
+            }
+        }
+        stage('Restart Onay') {
+                    steps {
+                        input message: " InitialSetup tamamlandı. Restart etmek için Proceed' bas."
+                    }
+            }
+        stage('Weblogic Restart') {
+                        steps {
+                            script {
+                                echo "🔄 Weblogic restart başlatılıyor..."
+                    
+                                withCredentials([sshUserPrivateKey(credentialsId: SSH_CRED_ID, 
+                                                                   keyFileVariable: 'SSH_KEY', 
+                                                                   usernameVariable: 'SSH_USER')]) {
+                    
+                                    sh """
+                                        ssh -i \$SSH_KEY -o StrictHostKeyChecking=no \$SSH_USER@${REMOTE_HOST} "
+                                            cd /appdata/restartconfig
+                                            pwd
+                                            sh starter.sh
+                                        "
+                                    """
+                                }
+                            }
+                        }
+                    }
+    }
+}

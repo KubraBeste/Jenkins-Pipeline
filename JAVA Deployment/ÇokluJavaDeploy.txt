@@ -1,0 +1,184 @@
+pipeline {
+    agent any
+
+    parameters {
+        string(
+            name: 'TICKET_PATHS',
+            defaultValue: '2025/09/CTM-5228,2025/10/CTM-6001',
+            description: 'Birden fazla ticketı virgülle ayırarak yaz (örn: 2025/09/CTM-5228,2025/10/CTM-6001)'
+        )
+    }
+    
+    environment {
+        GIT_REPO_URL = 'git_url'
+        SSH_CRED_ID  = 'ccb-deploy-ssh'       // Jenkins'te oluşturduğun SSH anahtar ID'si
+        REMOTE_HOST  = ''           // Uzak sunucu
+        BASE_DIR     = '/appdata/ouaf/package/CM_EXTRACT'  // Ana dizin
+    }
+
+    stages {
+
+        stage('Checkout') {
+            steps {
+                script {
+                    echo "📦 Git deposu indiriliyor..."
+
+                    git branch: 'master',
+                        credentialsId: 'gitlab-account-token',
+                        url: "${GIT_REPO_URL}"
+
+                    // Ticket listesini böl ve kontrol et
+                    def tickets = params.TICKET_PATHS.split(',').collect { it.trim() }
+
+                    tickets.each { t ->
+                        sh "ls -l '${t}' || (echo '❌ ${t} klasörü bulunamadı!' && exit 1)"
+                    }
+
+                    echo "🎟 Ticket listesi: ${tickets}"
+                }
+            }
+        }
+
+        stage('Paket Oluşturma ve Java Kopyalama') {
+            steps {
+                script {
+                    echo "📦 isimdegistirmeoto.sh çalıştırılıyor ve yeni klasör belirleniyor..."
+                    def newFolder = ''
+
+                    withCredentials([sshUserPrivateKey(
+                        credentialsId: SSH_CRED_ID,
+                        keyFileVariable: 'SSH_KEY',
+                        usernameVariable: 'SSH_USER'
+                    )]) {
+                        newFolder = sh(
+                            script: """
+                                ssh -i "\$SSH_KEY" -o StrictHostKeyChecking=no "\$SSH_USER"@${REMOTE_HOST} \
+                                    "bash ${BASE_DIR}/isimdegistirmeoto.sh" | head -n 1
+                            """,
+                            returnStdout: true
+                        ).trim()
+                    }
+
+                    echo "📁 Yeni oluşturulan klasör: ${newFolder}"
+                    echo "🚀 Java dosyaları package yapısına göre kopyalanıyor..."
+
+                    // Aynı stage içinde tekrar ticket listesini hazırla
+                    def tickets = params.TICKET_PATHS.split(',').collect { it.trim() }
+                    // Shell tarafında rahat kullanmak için boşlukla birleştir
+                    def ticketList = tickets.join(' ')
+
+                    withCredentials([sshUserPrivateKey(
+                        credentialsId: SSH_CRED_ID,
+                        keyFileVariable: 'SSH_KEY',
+                        usernameVariable: 'SSH_USER'
+                    )]) {
+                        sh """
+                            for ticket in ${ticketList}; do
+                              echo "🔥 Ticket klasörü işleniyor: \$ticket"
+
+                              for file in \$(find "\$ticket" -type f -name "*.java" \\
+                                                ! -path "*/BACKUP/*" \\
+                                                ! -path "*/Backup/*"); do
+
+                                echo "🔍 \$file inceleniyor..."
+                                pkg_line=\$(grep -m1 '^package' "\$file" | sed 's/package //' | sed 's/;//')
+                                if [ -z "\$pkg_line" ]; then
+                                    echo "⚠️ package satırı bulunamadı, atlanıyor: \$file"
+                                    continue
+                                fi
+
+                                pkg_path=\$(echo "\$pkg_line" | tr '.' '/')
+                                target_dir="${BASE_DIR}/${newFolder}/java/source/cm/\$pkg_path"
+
+                                echo "📂 Hedef dizin: \$target_dir"
+                                ssh -i "\$SSH_KEY" -o StrictHostKeyChecking=no "\$SSH_USER"@${REMOTE_HOST} "mkdir -p \$target_dir"
+                                scp -i "\$SSH_KEY" -o StrictHostKeyChecking=no "\$file" "\$SSH_USER"@${REMOTE_HOST}:\$target_dir/
+                              done
+                            done
+                        """
+                    }
+
+                    echo "✅ Tüm ticket’lardaki Java dosyaları doğru package dizinlerine yerleştirildi."
+                }
+            }
+        }
+
+        stage('Manuel Onay') {
+            steps {
+                input message: "☕ Java dosyaları gönderildi. Devam etmek için 'Proceed' düğmesine basın."
+            }
+        }
+
+        stage('ApplyCM') {
+            steps {
+                script {
+                    echo "🚀 ApplyCM çalıştırılıyor..."
+
+                    withCredentials([sshUserPrivateKey(
+                        credentialsId: SSH_CRED_ID,
+                        keyFileVariable: 'SSH_KEY',
+                        usernameVariable: 'SSH_USER'
+                    )]) {
+                        sh """
+                            ssh -i "\$SSH_KEY" -o StrictHostKeyChecking=no "\$SSH_USER"@${REMOTE_HOST} "
+                                sh /appdata/scripts/splenv.sh << 'EOF'
+                                sh /appdata/ouaf/package/CM_EXTRACT/deploy.sh
+                                EOF
+                            "
+                        """
+                    }
+                }
+            }
+        }
+
+        stage('Initial Setup') {
+            steps {
+                script {
+                    echo "🔧 initialSetup çalıştırılıyor..."
+
+                    withCredentials([sshUserPrivateKey(
+                        credentialsId: SSH_CRED_ID,
+                        keyFileVariable: 'SSH_KEY',
+                        usernameVariable: 'SSH_USER'
+                    )]) {
+                        // Buradaki EOF yapısı bozuktu, düzelttim
+                        sh """
+                            ssh -i \$SSH_KEY -o StrictHostKeyChecking=no \$SSH_USER@${REMOTE_HOST} "
+                                        sh /appdata/scripts/splenv.sh << EOF
+                                        sh /appdata/ouaf/CCBMIG/bin/initialSetup.sh << EOF
+                                    "
+                        """
+                    }
+                }
+            }
+        }
+
+        stage('Restart') {
+            steps {
+                input message: "☕ ApplyCM + initialSetup tamamlandı. Restart etmek için 'Proceed'e bas."
+            }
+        }
+
+        stage('Weblogic Restart') {
+            steps {
+                script {
+                    echo "🔄 Weblogic restart başlatılıyor..."
+
+                    withCredentials([sshUserPrivateKey(
+                        credentialsId: SSH_CRED_ID,
+                        keyFileVariable: 'SSH_KEY',
+                        usernameVariable: 'SSH_USER'
+                    )]) {
+                        sh """
+                            ssh -i "\$SSH_KEY" -o StrictHostKeyChecking=no "\$SSH_USER"@${REMOTE_HOST} "
+                                cd /appdata/restartconfig
+                                pwd
+                                sh starter.sh
+                            "
+                        """
+                    }
+                }
+            }
+        }
+    }
+}

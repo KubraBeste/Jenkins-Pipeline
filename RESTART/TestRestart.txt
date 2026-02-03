@@ -1,0 +1,31 @@
+pipeline {
+    agent any
+     environment {
+        GIT_REPO_URL = 'git_url'
+        SSH_CRED_ID  = 'ccb-deploy-ssh'       // Jenkins'te oluşturduğun SSH anahtar ID'si
+        REMOTE_HOST  = ''           // Uzak sunucu
+        BASE_DIR     = '/appdata/ouaf/package/CM_EXTRACT'  // Ana dizin
+    }
+        stages {
+        stage('Weblogic Restart') {
+                    steps {
+                        script {
+                            echo "🔄 Weblogic restart başlatılıyor..."
+                
+                            withCredentials([sshUserPrivateKey(credentialsId: SSH_CRED_ID, 
+                                                               keyFileVariable: 'SSH_KEY', 
+                                                               usernameVariable: 'SSH_USER')]) {
+                
+                                sh """
+                                    ssh -i "\$SSH_KEY" -o StrictHostKeyChecking=no \$SSH_USER@${REMOTE_HOST} "
+                                        cd /appdata/restartconfig
+                                        pwd
+                                        sh starter.sh
+                                    "
+                                """
+                            }
+                        }
+                    }
+                }
+        }
+}

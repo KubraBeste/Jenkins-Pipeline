@@ -1,0 +1,180 @@
+pipeline {
+    agent any
+    
+    environment {
+        GIT_REPO_URL = 'git_url'
+        SSH_CRED_ID  = 'ccb-deploy-ssh'     // Jenkins SSH key ID
+
+		HOST_1 = ''
+		HOST_2 = ''
+		HOST_3 = ''
+
+        BASE_DIR = ''
+    }
+    
+    stages {
+
+        stage('Onay 1') {
+            steps {
+                input message: "XSL/JSP/XJS ve benzeri dosya tüm adreslere manuel yüklendi."
+            }
+        }
+
+        stage('Structers temizleme ve InitialSetup 1') {
+            steps {
+                script {
+                    echo "🔧 initialSetup çalıştırılıyor..."
+
+                    withCredentials([sshUserPrivateKey(
+                        credentialsId: SSH_CRED_ID,
+                        keyFileVariable: 'SSH_KEY',
+                        usernameVariable: 'SSH_USER'
+                    )]) {
+
+                        sh """
+                            ssh -i "\$SSH_KEY" -o StrictHostKeyChecking=no \$SSH_USER@${HOST_1} "
+                                        sh /appdata/scripts/splenv.sh << EOF
+                                        rm -rf /appdata/ouaf/CCBMIG/structures/*.processed
+                                        sh /appdata/ouaf/CCBMIG/bin/initialSetup.sh << EOF
+                                    "
+                        """
+                    }
+                }
+            }
+        }
+        stage('Structers temizleme ve InitialSetup 2') {
+            steps {
+                script {
+                    echo "🔧 initialSetup çalıştırılıyor..."
+
+                    withCredentials([sshUserPrivateKey(
+                        credentialsId: SSH_CRED_ID,
+                        keyFileVariable: 'SSH_KEY',
+                        usernameVariable: 'SSH_USER'
+                    )]) {
+
+                        sh """
+                            ssh -i "\$SSH_KEY" -o StrictHostKeyChecking=no \$SSH_USER@${HOST_2} "
+                                        sh /appdata/scripts/splenv.sh << EOF
+                                        rm -rf /appdata/ouaf/CCBMIG/structures/*.processed
+                                        sh /appdata/ouaf/CCBMIG/bin/initialSetup.sh << EOF
+                                    "
+                        """
+                    }
+                }
+            }
+        }
+        stage('Structers temizleme ve InitialSetup 3') {
+            steps {
+                script {
+                    echo "🔧 initialSetup çalıştırılıyor..."
+
+                    withCredentials([sshUserPrivateKey(
+                        credentialsId: SSH_CRED_ID,
+                        keyFileVariable: 'SSH_KEY',
+                        usernameVariable: 'SSH_USER'
+                    )]) {
+
+                        sh """
+                            ssh -i "\$SSH_KEY" -o StrictHostKeyChecking=no \$SSH_USER@${HOST_3} "
+                                        sh /appdata/scripts/splenv.sh << EOF
+                                        rm -rf /appdata/ouaf/CCBMIG/structures/*.processed
+                                        sh /appdata/ouaf/CCBMIG/bin/initialSetup.sh << EOF
+                                    "
+                        """
+                    }
+                }
+            }
+        }
+       stage('1') {
+            steps {
+                input message: "1 restart edilsin mi"
+            }
+        }
+        /*Restartlar */
+        stage('STOP 1') {
+            steps {
+                script {
+                    echo "🛑 stop.sh başlatılıyor..."
+
+                    withCredentials([sshUserPrivateKey(
+                        credentialsId: SSH_CRED_ID,
+                        keyFileVariable: 'SSH_KEY',
+                        usernameVariable: 'SSH_USER'
+                    )]) {
+
+                        sh """
+                            ssh -i "\$SSH_KEY" -o StrictHostKeyChecking=no \$SSH_USER@${HOST_1} "
+                                cd /appdata/restart
+                                sh stop.sh
+                            "
+                        """
+                    }
+                }
+            }
+        }
+        stage('renamefolder (1)') {
+            steps {
+                script {
+                    echo "📁 renamefolder2.sh çalışıyor (1)..."
+
+                    withCredentials([sshUserPrivateKey(
+                        credentialsId: SSH_CRED_ID,
+                        keyFileVariable: 'SSH_KEY',
+                        usernameVariable: 'SSH_USER'
+                    )]) {
+
+                        sh """
+                            ssh -i "\$SSH_KEY" -o StrictHostKeyChecking=no \$SSH_USER@${HOST_1} "
+                                cd /appdata/scripts
+                                sh renamefolder2.sh
+                            "
+                        """
+                    }
+                }
+            }
+        }
+        stage('renamefolder (2)') {
+            steps {
+                script {
+                    echo "📁 renamefolder2.sh çalışıyor (2)..."
+
+                    withCredentials([sshUserPrivateKey(
+                        credentialsId: SSH_CRED_ID,
+                        keyFileVariable: 'SSH_KEY',
+                        usernameVariable: 'SSH_USER'
+                    )]) {
+
+                        sh """
+                            ssh -i "\$SSH_KEY" -o StrictHostKeyChecking=no \$SSH_USER@${HOST_2} "
+                                cd /appdata/scripts
+                                sh renamefolder2.sh
+                            "
+                        """
+                    }
+                }
+            }
+        }
+        stage('START 1') {
+            steps {
+                script {
+                    echo "🚀 start.sh başlatılıyor..."
+
+                    withCredentials([sshUserPrivateKey(
+                        credentialsId: SSH_CRED_ID,
+                        keyFileVariable: 'SSH_KEY',
+                        usernameVariable: 'SSH_USER'
+                    )]) {
+
+                        sh """
+                            ssh -i "\$SSH_KEY" -o StrictHostKeyChecking=no \$SSH_USER@${HOST_1} "
+                                cd /appdata/restart
+                                sh start.sh
+                            "
+                        """
+                    }
+                }
+            }
+        }
+    }
+}

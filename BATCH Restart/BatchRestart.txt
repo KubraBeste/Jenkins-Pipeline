@@ -1,0 +1,112 @@
+pipeline {
+    agent any
+    #Ortama göre değiştirilmeli
+    environment {
+        BATCH_HOST = ""
+        DB_HOST = ""
+        DB_SERVICE = "SERVICE_NAME/SID"
+        SSH_CRED_ID = 'ccb-deploy-ssh'
+        DB_CRED_ID  = 'ccb-db-cred'
+        TARGET_HOST = ''
+        ORACLE_HOME = '...'
+    }
+
+    stages {
+
+        stage('Batch Restart ()') {
+            steps {
+                script {
+                    withCredentials([sshUserPrivateKey(credentialsId: SSH_CRED_ID,
+                                                       keyFileVariable: 'SSH_KEY',
+                                                       usernameVariable: 'SSH_USER')]) {
+
+                        sh """
+                            ssh -i "\$SSH_KEY" -o StrictHostKeyChecking=no \$SSH_USER@\$TARGET_HOST '
+                                
+                                echo "🔍 ThreadPoolWorker process aranıyor..."
+
+                                line=\$(ps -ef | grep java | grep threadpoolworker.DEFAULT | grep -v grep)
+
+                                if [ -z "\$line" ]; then
+                                    echo "❌ ThreadPoolWorker bulunamadı."
+                                    exit 1
+                                fi
+
+                                echo "📄 Bulunan satır:"
+                                echo "\$line"
+
+                                MYPID=\$(echo "\$line" | awk "{print \\\$2}")
+                                MYPPID=\$(echo "\$line" | awk "{print \\\$3}")
+
+                                echo "🔎 PID: \$MYPID"
+                                echo "🔎 PPID: \$MYPPID"
+
+                                echo "🛑 Processler öldürülüyor..."
+                                kill -9 \$MYPID
+                                kill -9 \$MYPPID || true
+
+                                echo "✅ Batch process başarıyla öldürüldü."
+                            '
+                        """
+                    }
+                }
+            }
+        }
+
+        stage('DB Cache Temizleme') {
+                    steps {
+                        script {
+                            withCredentials([
+                                sshUserPrivateKey(credentialsId: SSH_CRED_ID,
+                                                  keyFileVariable: 'SSH_KEY',
+                                                  usernameVariable: 'SSH_USER'),
+                                usernamePassword(credentialsId: DB_CRED_ID,
+                                                 usernameVariable: 'DB_USER',
+                                                 passwordVariable: 'DB_PASS')
+                            ]) {
+                
+                                sh """
+                                        ssh -i "\$SSH_KEY" -o StrictHostKeyChecking=no \$SSH_USER@${BATCH_HOST} '
+                                            echo "🧹 DB Cache temizleme başlatılıyor..."
+                                            export ORACLE_HOME=/appdata/oracle_client/product/12.2.0/client_1
+                                            export PATH=\$ORACLE_HOME/bin:\$PATH
+                                        
+                                            \$ORACLE_HOME/bin/sqlplus ${DB_USER}/${DB_PASS}@//${DB_HOST}:1521/${DB_SERVICE} <<EOF
+                                            @/appdata/scripts/batchcacheremove.sql
+                                            exit;
+                                        EOF
+                                        
+                                            echo "✅ DB Cache temizleme tamamlandı."
+                                        '
+                                        """
+                            }
+                        }
+                    }
+                }
+              
+        stage('Batch Start ()') {
+                    steps {
+                        script {
+                            withCredentials([sshUserPrivateKey(credentialsId: SSH_CRED_ID,
+                                                              keyFileVariable: 'SSH_KEY',
+                                                              usernameVariable: 'SSH_USER')]) {
+                
+                                sh """
+                                ssh -i "\$SSH_KEY" -o StrictHostKeyChecking=no \$SSH_USER@$BATCH_HOST '
+                                    echo "🚀 Batch yeniden başlatılıyor..."
+                                    sh /appdata/scripts/splenv.sh << "EOF"
+                                    sh /appdata/ouaf/CCBMIG/bin/spl.sh -b start
+                                    EOF
+                                    echo "✅ Batch başarıyla başlatıldı."
+                                '
+                                """
+                            }
+                        }
+                    }
+                }
+
+
+
+
+    }
+}

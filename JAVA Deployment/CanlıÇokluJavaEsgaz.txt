@@ -1,0 +1,351 @@
+pipeline {
+    agent any
+
+    parameters {
+        string(
+            name: 'TICKET_PATHS',
+            defaultValue: '2025/09/CTM-5228,2025/10/CTM-6001',
+            description: 'Birden fazla ticketı virgülle ayırarak yaz (örn: 2025/09/CTM-5228,2025/10/CTM-6001)'
+        )
+    }
+
+    environment {
+        GIT_REPO_URL = 'git_url'
+        SSH_CRED_ID  = 'ccb-deploy-ssh'     // Jenkins SSH key ID
+
+        HOST_1 = ''
+        HOST_2 = ''
+        HOST_3 = ''
+
+        BASE_DIR = '/appdata/ouaf/package/CM_EXTRACT'
+    }
+
+    stages {
+
+        /* ============================================================
+         *                    GIT CHECKOUT
+         * ============================================================ */
+        stage('Checkout') {
+            steps {
+                script {
+                    echo "📦 Git deposu indiriliyor..."
+
+                    git branch: 'master',
+                        credentialsId: 'gitlab-account-token',
+                        url: "${GIT_REPO_URL}"
+
+                    // Ticket listesini böl
+                    tickets = params.TICKET_PATHS.split(',').collect { it.trim() }
+
+                    // Her ticket kontrol edilir
+                    tickets.each { t ->
+                        sh "ls -l ${t} || (echo '❌ ${t} klasörü bulunamadı!' && exit 1)"
+                    }
+
+                    echo "🎟 Ticket listesi: ${tickets}"
+                }
+            }
+        }
+
+        /* ============================================================
+         *   PAKET OLUŞTURMA + ÇOKLU TICKET JAVA KOPYALAMA
+         * ============================================================ */
+        stage('Paket Oluşturma & Java Kopyalama') {
+            steps {
+                script {
+                    def newFolder = ""
+
+                    withCredentials([sshUserPrivateKey(
+                        credentialsId: SSH_CRED_ID,
+                        keyFileVariable: 'SSH_KEY',
+                        usernameVariable: 'SSH_USER'
+                    )]) {
+
+                        /* Yeni klasör oluştur */
+                        newFolder = sh(
+                            script: """
+                                ssh -i "\$SSH_KEY" -o StrictHostKeyChecking=no \$SSH_USER@${HOST_1} \
+                                "bash ${BASE_DIR}/isimdegistirmeoto.sh" | head -n 1
+                            """,
+                            returnStdout: true
+                        ).trim()
+
+                        echo "📁 Yeni CM klasörü: ${newFolder}"
+
+                        /* ============================================================
+                         *    TÜM TİCKET KLASÖRLERİNİN JAVA DOSYALARINI YÜKLE
+                         * ============================================================ */
+                        tickets.each { ticket ->
+
+                            echo "🔥 İşleniyor: ${ticket}"
+
+                            sh """
+                                for file in \$(find ${ticket} -type f -name "*.java" \
+                                            ! -path "*/BACKUP/*" ! -path "*/Backup/*"); do
+
+                                    echo "🔍 Java dosyası bulundu: \$file"
+
+                                    pkg_line=\$(grep -m1 '^package' "\$file" | sed 's/package //' | sed 's/;//')
+                                    [ -z "\$pkg_line" ] && echo "⚠️ Package bulunamadı → atlanıyor" && continue
+
+                                    pkg_path=\$(echo "\$pkg_line" | tr '.' '/')
+
+                                    target_dir="${BASE_DIR}/${newFolder}/java/source/cm/\$pkg_path"
+
+                                    ssh -i "\$SSH_KEY" -o StrictHostKeyChecking=no \$SSH_USER@${HOST_1} "mkdir -p \$target_dir"
+
+                                    scp -i "\$SSH_KEY" -o StrictHostKeyChecking=no "\$file" \
+                                        \$SSH_USER@${HOST_1}:\$target_dir/
+                                done
+                            """
+                        }
+                    }
+
+                    echo "🎯 Tüm ticket’lardaki Java dosyaları başarıyla gönderildi."
+                }
+            }
+        }
+
+        /* ============================================================
+         *                  MANUEL ONAY
+         * ============================================================ */
+        stage('Onay 1') {
+            steps {
+                input message: "☕ Java yükleme tamamlandı. Devam etmek için Proceed."
+            }
+        }
+
+        /* ============================================================
+         *                        APPLY CM
+         * ============================================================ */
+        stage('ApplyCM') {
+            steps {
+                script {
+                    echo "🚀 ApplyCM başlatılıyor..."
+
+                    withCredentials([sshUserPrivateKey(
+                        credentialsId: SSH_CRED_ID,
+                        keyFileVariable: 'SSH_KEY',
+                        usernameVariable: 'SSH_USER'
+                    )]) {
+
+                        sh """
+                            ssh -i "\$SSH_KEY" -o StrictHostKeyChecking=no \$SSH_USER@${HOST_1} "
+                                sh /appdata/scripts/splenv.sh << 'EOF'
+                                sh /appdata/ouaf/package/CM_EXTRACT/deploy.sh
+                                EOF
+                            "
+                        """
+                    }
+                }
+            }
+        }
+
+        /* ============================================================
+         *                     INITIAL SETUP
+         * ============================================================ */
+        stage('InitialSetup') {
+            steps {
+                script {
+                    echo "🔧 initialSetup çalıştırılıyor..."
+
+                    withCredentials([sshUserPrivateKey(
+                        credentialsId: SSH_CRED_ID,
+                        keyFileVariable: 'SSH_KEY',
+                        usernameVariable: 'SSH_USER'
+                    )]) {
+
+                        sh """
+                            ssh -i "\$SSH_KEY" -o StrictHostKeyChecking=no \$SSH_USER@${HOST_1} "
+                                        sh /appdata/scripts/splenv.sh << EOF
+                                        sh /appdata/ouaf/CCBMIG/bin/initialSetup.sh << EOF
+                                    "
+                        """
+                    }
+                }
+            }
+        }
+
+        /* ============================================================
+         *                      MANUEL ONAY 2
+         * ============================================================ */
+        stage('Onay 2') {
+            steps {
+                input message: "☕ ApplyCM + initialSetup tamamlandı. Proceed ile cm.jar aşamasına geç."
+            }
+        }
+
+        /* ============================================================
+         *                      CM.JAR → XXY & XXZ
+         * ============================================================ */
+        stage('cm.jar Aktarım') {
+            steps {
+                script {
+                    echo "📦 cm.jar 2 ve 3 sunucularına aktarılıyor..."
+
+                    withCredentials([sshUserPrivateKey(
+                        credentialsId: SSH_CRED_ID,
+                        keyFileVariable: 'SSH_KEY',
+                        usernameVariable: 'SSH_USER'
+                    )]) {
+
+                        sh """
+                            ssh -i "\$SSH_KEY" -o StrictHostKeyChecking=no "\$SSH_USER"@${HOST_1} '
+                            set -e
+                            echo "SOURCE: \$(hostname)"
+                            ls -l /appdata/ouaf/CCBMIG/etc/lib/cm.jar
+                
+                            scp -o StrictHostKeyChecking=no /appdata/ouaf/CCBMIG/etc/lib/cm.jar \
+                              ${SSH_USER}@${HOST_2}:/appdata/ouaf/CCBMIG/etc/lib/
+                
+                            scp -o StrictHostKeyChecking=no /appdata/ouaf/CCBMIG/etc/lib/cm.jar \
+                              ${SSH_USER}@${HOST_3}:/appdata/ouaf/CCBMIG/etc/lib/
+                        """
+                    }
+                }
+            }
+        }
+
+        stage('cm.jar Güncelle (2)') {
+            steps {
+                script {
+                    echo "🔧 2 → cm_jar.sh çalışıyor..."
+
+                    withCredentials([sshUserPrivateKey(
+                        credentialsId: SSH_CRED_ID,
+                        keyFileVariable: 'SSH_KEY',
+                        usernameVariable: 'SSH_USER'
+                    )]) {
+
+                        sh """
+                            ssh -i "\$SSH_KEY" -o StrictHostKeyChecking=no \$SSH_USER@${HOST_2} "
+                                cd /appdata/scripts
+                                sh cm_jar.sh
+                            "
+                        """
+                    }
+                }
+            }
+        }
+
+        stage('cm.jar Güncelle (3)') {
+            steps {
+                script {
+                    echo "🔧 3 → cm_jar.sh çalışıyor..."
+
+                    withCredentials([sshUserPrivateKey(
+                        credentialsId: SSH_CRED_ID,
+                        keyFileVariable: 'SSH_KEY',
+                        usernameVariable: 'SSH_USER'
+                    )]) {
+
+                        sh """
+                            ssh -i "\$SSH_KEY" -o StrictHostKeyChecking=no \$SSH_USER@${HOST_3} "
+                                cd /appdata/scripts
+                                sh cm_jar.sh
+                            "
+                        """
+                    }
+                }
+            }
+        }
+
+        /* ============================================================
+         *                            STOP
+         * ============================================================ */
+        stage('STOP') {
+            steps {
+                script {
+                    echo "🛑 stop.sh başlatılıyor..."
+
+                    withCredentials([sshUserPrivateKey(
+                        credentialsId: SSH_CRED_ID,
+                        keyFileVariable: 'SSH_KEY',
+                        usernameVariable: 'SSH_USER'
+                    )]) {
+
+                        sh """
+                            ssh -i "\$SSH_KEY" -o StrictHostKeyChecking=no \$SSH_USER@${HOST_1} "
+                                cd /appdata/restart
+                                sh stop.sh
+                            "
+                        """
+                    }
+                }
+            }
+        }
+
+        /* ============================================================
+         *                     RENAMEFOLDER (XXX & XXY)
+         * ============================================================ */
+        stage('renamefolder (1)') {
+            steps {
+                script {
+                    echo "📁 renamefolder2.sh çalışıyor (1)..."
+
+                    withCredentials([sshUserPrivateKey(
+                        credentialsId: SSH_CRED_ID,
+                        keyFileVariable: 'SSH_KEY',
+                        usernameVariable: 'SSH_USER'
+                    )]) {
+
+                        sh """
+                            ssh -i "\$SSH_KEY" -o StrictHostKeyChecking=no \$SSH_USER@${HOST_1} "
+                                cd /appdata/scripts
+                                sh renamefolder2.sh
+                            "
+                        """
+                    }
+                }
+            }
+        }
+
+        stage('renamefolder (2)') {
+            steps {
+                script {
+                    echo "📁 renamefolder2.sh çalışıyor (2)..."
+
+                    withCredentials([sshUserPrivateKey(
+                        credentialsId: SSH_CRED_ID,
+                        keyFileVariable: 'SSH_KEY',
+                        usernameVariable: 'SSH_USER'
+                    )]) {
+
+                        sh """
+                            ssh -i "\$SSH_KEY" -o StrictHostKeyChecking=no \$SSH_USER@${HOST_2} "
+                                cd /appdata/scripts
+                                sh renamefolder2.sh
+                            "
+                        """
+                    }
+                }
+            }
+        }
+
+        /* ============================================================
+         *                            START
+         * ============================================================ */
+        stage('START') {
+            steps {
+                script {
+                    echo "🚀 start.sh başlatılıyor..."
+
+                    withCredentials([sshUserPrivateKey(
+                        credentialsId: SSH_CRED_ID,
+                        keyFileVariable: 'SSH_KEY',
+                        usernameVariable: 'SSH_USER'
+                    )]) {
+
+                        sh """
+                            ssh -i "\$SSH_KEY" -o StrictHostKeyChecking=no \$SSH_USER@${HOST_1} "
+                                cd /appdata/restart
+                                sh start.sh
+                            "
+                        """
+                    }
+                }
+            }
+        }
+
+    }
+}
