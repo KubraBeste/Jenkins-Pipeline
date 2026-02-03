@@ -1,0 +1,109 @@
+pipeline {
+    agent any
+
+    parameters {
+        string(name: 'TICKET_PATH', defaultValue: '2025/01/CTM-5065', description: 'Yıl/Ay/Ticket formatında yaz')
+    }
+
+    environment {
+        SONAR_SCANNER = '/opt/sonar-scanner/bin/sonar-scanner'
+        SONAR_HOST = 'http://localhost:9000'
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                git branch: 'master',
+                    credentialsId: '',
+                    url: 'git_url'
+            }
+        }
+                               stage('SonarQube Analysis') {
+                                    steps {
+                                        script {
+                                            def path = "${params.TICKET_PATH}"
+                                            def projectKey = path.replaceAll("/", "_")
+                                            dir(path) {
+                                                //def javaFiles = sh(script: "find . -type f -name '*.java' ", returnStdout: true).trim()
+                                                def javaFiles = sh(
+                                                                        script: "find . -type f -name '*.java' ! -path '*/[Bb][Aa][Cc][Kk][Uu][Pp]/*'",
+                                                                        returnStdout: true
+                                                                    ).trim()
+
+                                                if (javaFiles != '0') {
+                                                    
+                                            echo "✅ ${javaFiles} analiz edilebilir dosya bulundu (Java +)SonarQube analizi başlatılıyor..."
+                                                    withSonarQubeEnv('SonarQube Server') {
+                                                        withCredentials([string(credentialsId: 'sonar-token', variable: 'SONAR_TOKEN')]) {
+                                                            sh """
+                                                                /opt/sonar-scanner/bin/sonar-scanner \
+                                                                  -Dsonar.projectKey=${projectKey} \
+                                                                  -Dsonar.sources=. \
+                                                                  -Dsonar.java.binaries=. \
+                                                                  -Dsonar.host.url=localhost:9000 \
+                                                                  -Dsonar.token=$SONAR_TOKEN
+                                                            """
+                                                        }
+                                                    }
+                                                } else {
+                                                    echo '⚠️ Analiz edilebilir dosya (Java/) bulunamadı. Tarama atlandı.'
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+
+           stage('Quality Gate (REST API Takibi)') {
+            steps {
+                script {
+                    withCredentials([string(credentialsId: 'sonar-token', variable: 'SONAR_TOKEN')]) {
+                        def projectKey = "${params.TICKET_PATH}".replaceAll('/', '_')
+                        def sonarHost = "http://localhost:9000"
+                        def taskId = sh(script: "grep 'ceTaskId' ${params.TICKET_PATH}/.scannerwork/report-task.txt | cut -d= -f2", returnStdout: true).trim()
+                        echo "📡 Analiz Task ID: ${taskId}"
+
+                        def status = "PENDING"
+                        def tries = 0
+
+                        while (status == "PENDING" || status == "IN_PROGRESS") {
+                            sleep 15
+                            tries++
+                            echo "⏳ SonarQube analizi kontrol ediliyor... (${tries}x)"
+                            def json = sh(
+                                script: "curl -s -u ${SONAR_TOKEN}: ${sonarHost}/api/ce/task?id=${taskId}",
+                                returnStdout: true
+                            ).trim()
+
+                            if (json.contains('"status":"SUCCESS"')) {
+                                echo "✅ SonarQube analiz işlemi tamamlandı."
+                                status = "SUCCESS"
+                            } else if (json.contains('"status":"FAILED"')) {
+                                echo "❌ SonarQube analiz işlemi başarısız oldu!"
+                                status = "FAILED"
+                            }
+                        }
+
+                        if (status == "SUCCESS") {
+                            def qualityJson = sh(
+                                script: "curl -s -u ${SONAR_TOKEN}: ${sonarHost}/api/qualitygates/project_status?projectKey=${projectKey}",
+                                returnStdout: true
+                            ).trim()
+
+                            if (qualityJson.contains('"status":"OK"')) {
+                                echo "🎯 Quality Gate: PASSED ✅"
+                                currentBuild.result = "SUCCESS"
+                            } else {
+                                echo "🚫 Quality Gate: FAILED ❌"
+                                currentBuild.result = "UNSTABLE"
+                            }
+
+                            echo "🔗 Rapor: ${sonarHost}/dashboard?id=${projectKey}"
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+}

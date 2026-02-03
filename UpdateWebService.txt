@@ -1,0 +1,32 @@
+pipeline {
+    agent any
+    
+     environment {
+        SSH_CRED_ID  = ''
+        HOST_NAME = ""
+        BASE_DIR     = ''
+        
+    }
+    stages{
+        stage('Webservis Update') {
+                    steps {
+                        script {
+                            echo "Update ediliyor"
+                
+                            withCredentials([sshUserPrivateKey(credentialsId: SSH_CRED_ID, 
+                                                               keyFileVariable: 'SSH_KEY', 
+                                                               usernameVariable: 'SSH_USER')]) {
+                
+                                sh """
+                                    ssh -i \$SSH_KEY -o StrictHostKeyChecking=no \$SSH_USER@${HOST_NAME} "
+                                        cd /appdata/restartconfig
+                                        pwd
+                                        sh webservisupdate.sh
+                                    "
+                                """
+                            }
+                        }
+                    }
+                }
+    }
+}

@@ -1,0 +1,119 @@
+pipeline {
+    agent any
+
+    parameters {
+        string(
+            name: 'TICKET_PATH',
+            defaultValue: '2025/09/CTM-5228',
+            description: 'Yıl/Ay/Ticket formatında yaz (örnek: 2025/09/CTM-5228)'
+        )
+    }
+
+    environment {
+        GIT_REPO_URL = ''
+        SSH_CRED_ID  = ''
+        REMOTE_HOST  = ''
+        BASE_DIR     = ''
+    }
+
+    stages {
+
+        stage('Checkout from GitLab') {
+            steps {
+                script {
+                    echo "📦 Git deposu indiriliyor..."
+                    git branch: 'master',
+                        credentialsId: 'gitlab-account-token',
+                        url: "${GIT_REPO_URL}"
+
+                    echo "🎟 Ticket path: ${params.TICKET_PATH}"
+                    sh "ls -l ${params.TICKET_PATH} || (echo '❌ ${params.TICKET_PATH} bulunamadı!' && exit 1)"
+                }
+            }
+        }
+
+        stage('Validate Ticket Path') {
+            steps {
+                sh '''
+                    set -e
+                    echo "🎫 Ticket path kontrol ediliyor: ${TICKET_PATH}"
+
+                    if [ ! -d "${TICKET_PATH}" ]; then
+                        echo "❌ Ticket path bulunamadı: ${TICKET_PATH}"
+                        exit 1
+                    fi
+                '''
+            }
+        }
+
+        stage('Copy XSL Files (Ticket Path Based)') {
+            steps {
+                sshagent(credentials: ["${SSH_CRED_ID}"]) {
+                    sh '''
+                        set -e
+                        echo "📄 ${TICKET_PATH} altındaki XSL dosyaları (Backup hariç):"
+
+                        find ${TICKET_PATH} \
+                          -type d \\( -iname backup -o -iname Backup -o -iname BACKUP \\) -prune \
+                          -o -type f -name "*.xsl" -print
+
+                        echo "🚀 XSL dosyaları deploy ediliyor..."
+
+                        find ${TICKET_PATH} \
+                          -type d \\( -iname backup -o -iname Backup -o -iname BACKUP \\) -prune \
+                          -o -type f -name "*.xsl" \
+                          -exec scp -o StrictHostKeyChecking=no {} \
+                          cissys@${REMOTE_HOST}:${BASE_DIR}/ \\;
+                    '''
+                }
+            }
+        }
+        
+        stage('Initial Setup') {
+                    steps {
+                        script {
+                            echo "🔧 initialSetup çalıştırılıyor..."
+                
+                            withCredentials([sshUserPrivateKey(credentialsId: SSH_CRED_ID, keyFileVariable: 'SSH_KEY', usernameVariable: 'SSH_USER')]) {
+                
+                                sh """
+                                    ssh -i \$SSH_KEY -o StrictHostKeyChecking=no \$SSH_USER@${REMOTE_HOST} "
+                                            sh /appdata/scripts/splenv.sh << EOF
+            
+                                            sh /appdata/ouaf/CCBMIG/bin/initialSetup.sh << EOF
+                                        EOF
+                                    "
+                                """
+                            }
+                        }
+                    }
+        }
+        stage('Restart Onay') {
+                steps {
+                    input message: " InitialSetup tamamlandı. Restart etmek için Proceed' bas."
+                }
+        }
+        stage('Weblogic Restart') {
+                    steps {
+                        script {
+                            echo "🔄 Weblogic restart başlatılıyor..."
+                
+                            withCredentials([sshUserPrivateKey(credentialsId: SSH_CRED_ID, 
+                                                               keyFileVariable: 'SSH_KEY', 
+                                                               usernameVariable: 'SSH_USER')]) {
+                
+                                sh """
+                                    ssh -i "\$SSH_KEY" -o StrictHostKeyChecking=no \$SSH_USER@${REMOTE_HOST} "
+                                        cd /appdata/restartconfig
+                                        pwd
+                                        sh starter.sh
+                                    "
+                                """
+                            }
+                        }
+                    }
+                }
+    }
+
+    
+}
